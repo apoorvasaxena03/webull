@@ -1,5 +1,4 @@
 import argparse
-import collections
 import getpass
 import hashlib
 import json
@@ -1023,32 +1022,31 @@ class webull :
         just a start, add more as you need it
         '''
 
-        jdict = collections.defaultdict(dict)
-        jdict['fetch'] = 200
-        jdict['rules'] = collections.defaultdict(str)
-        jdict['sort'] = collections.defaultdict(str)
-        jdict['attach'] = {'hkexPrivilege': 'true'}  #unknown meaning, was in network trace
+        headers = self.build_req_headers()
 
-        jdict['rules']['wlas.screener.rule.region'] = 'securities.region.name.6'
+        rules = {'wlas.screener.rule.region': 'securities.region.name.6'}
         if not price_lte is None and not price_gte is None:
-            # lte and gte are backwards
-            jdict['rules']['wlas.screener.rule.price'] = 'gte=' + str(price_lte) + '&lte=' + str(price_gte)
-
+            # lte and gte are backwards in the API
+            rules['wlas.screener.rule.price'] = 'gte=' + str(price_lte) + '&lte=' + str(price_gte)
         if not vol_lte is None and not vol_gte is None:
-            # lte and gte are backwards
-            jdict['rules']['wlas.screener.rule.volume'] = 'gte=' + str(vol_lte) + '&lte=' + str(vol_gte)
-
+            # lte and gte are backwards in the API
+            rules['wlas.screener.rule.volume'] = 'gte=' + str(vol_lte) + '&lte=' + str(vol_gte)
         if not pct_chg_lte is None and not pct_chg_gte is None:
-            # lte and gte are backwards
-            jdict['rules']['wlas.screener.rule.changeRatio'] = 'gte=' + str(pct_chg_lte) + '&lte=' + str(pct_chg_gte)
+            # lte and gte are backwards in the API
+            rules['wlas.screener.rule.changeRatio'] = 'gte=' + str(pct_chg_lte) + '&lte=' + str(pct_chg_gte)
 
-        if sort is None:
-            jdict['sort']['rule'] = 'wlas.screener.rule.price'
-        if sort_dir is None:
-            jdict['sort']['desc'] = 'true'
+        jdict = {
+            'fetch': 200,
+            'rules': rules,
+            'sort': {
+                'rule': sort if sort is not None else 'wlas.screener.rule.price',
+                'desc': True if sort_dir is None else sort_dir,
+            },
+            # brokerId:8 = US equities; hkexPrivilege changed from string to bool in live API
+            'attach': {'brokerId': 8, 'hkexPrivilege': False},
+        }
 
-        # jdict = self._ddict2dict(jdict)
-        response = requests.post(self._urls.screener(), json=jdict, timeout=self.timeout)
+        response = requests.post(self._urls.screener(), json=jdict, headers=headers, timeout=self.timeout)
         result = response.json()
         return result
 
