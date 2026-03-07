@@ -43,72 +43,76 @@ class StreamConn :
     topic 108:  Seems to be 103 and 104 and T: depth:{ntvAggAskList:[{price:, volume}], ntvAggBidList:[{price:,volume:}]}}
     """
 
+    def _make_client(self, client_id):
+        """Create an MQTT client compatible with paho-mqtt v1.x and v2.x."""
+        try:
+            return mqtt.Client(
+                mqtt.CallbackAPIVersion.VERSION1,
+                client_id=client_id,
+                transport='websockets',
+            )
+        except (AttributeError, TypeError):
+            # paho-mqtt < 2.0 has no CallbackAPIVersion
+            return mqtt.Client(client_id=client_id, transport='websockets')
+
     def _setup_callbacks(self):
         """
         Has to be done this way to have them live in a class and not require self as the first parameter
         Python is kind enough to hold onto a copy of self for the callbacks to use later on
         return: addresses of the call backs
         """
-        def on_connect(client, userdata, flags, rc):
+        def on_connect(client, userdata, flags, rc, *args):
             """
             The callback for when the client receives a CONNACK response from the server.
             """
-            self.oncon_lock.acquire()
-            if self.debug_flg:
-                print("Connected with result code "+str(rc))
-            if rc != 0:
-                raise ValueError("Connection Failed with rc:"+str(rc))
-            self.oncon_lock.release()
+            with self.oncon_lock:
+                if self.debug_flg:
+                    print("Connected with result code "+str(rc))
+                if rc != 0:
+                    raise ValueError("Connection Failed with rc:"+str(rc))
 
-        def on_order_message(client, userdata, msg):
+        def on_order_message(client, userdata, msg, *args):
             #{tickerId, orderId, filledQuantity, orderType, orderStatus}
-            self.onmsg_lock.acquire()
-
-            topic = json.loads(msg.topic)
-            data = json.loads(msg.payload)
-            if self.debug_flg:
-                print(f'topic: {topic} ----- payload: {data}')
-
-            if not self.order_func is None:
-                self.order_func(topic, data)
-
-            self.onmsg_lock.release()
-
-        def on_price_message(client, userdata, msg):
-            self.onmsg_lock.acquire()
-            try:
+            with self.onmsg_lock:
                 topic = json.loads(msg.topic)
                 data = json.loads(msg.payload)
                 if self.debug_flg:
                     print(f'topic: {topic} ----- payload: {data}')
 
-                if not self.price_func is None:
-                    self.price_func(topic, data)
+                if self.order_func is not None:
+                    self.order_func(topic, data)
 
-            except Exception as e:
-                print(e)
-                time.sleep(2) #so theres time for message to print
-                os._exit(6)
+        def on_price_message(client, userdata, msg, *args):
+            with self.onmsg_lock:
+                try:
+                    topic = json.loads(msg.topic)
+                    data = json.loads(msg.payload)
+                    if self.debug_flg:
+                        print(f'topic: {topic} ----- payload: {data}')
 
-            self.onmsg_lock.release()
+                    if self.price_func is not None:
+                        self.price_func(topic, data)
 
-        def on_subscribe(client, userdata, mid, granted_qos, properties=None):
+                except Exception as e:
+                    print(e)
+                    time.sleep(2) #so theres time for message to print
+                    os._exit(6)
+
+        def on_subscribe(client, userdata, mid, granted_qos, *args):
             """
             The callback for when the client receives a SUBACK response from the server.
             """
-            self.onsub_lock.acquire()
-            if self.debug_flg:
-                print(f"subscribe accepted with QOS: {granted_qos} with mid: {mid}")
-            self.onsub_lock.release()
+            with self.onsub_lock:
+                if self.debug_flg:
+                    print(f"subscribe accepted with QOS: {granted_qos} with mid: {mid}")
 
-        def on_unsubscribe(client, userdata, mid):
+        def on_unsubscribe(client, userdata, mid, *args):
             """
               The callback for when the client receives a UNSUBACK response from the server.
               """
-            self.onsub_lock.acquire()
-            if self.debug_flg:
-                print(f"unsubscribe accepted with mid: {mid}")
-            self.onsub_lock.release()
+            with self.onsub_lock:
+                if self.debug_flg:
+                    print(f"unsubscribe accepted with mid: {mid}")
         #-------- end message callbacks
         return on_connect, on_subscribe, on_price_message, on_order_message, on_unsubscribe
 
@@ -142,7 +146,7 @@ class StreamConn :
                 # paper trade order updates are not send down this socket, I believe they
                 # are polled every 30=60 seconds from the app
 
-                self.client_order_upd = mqtt.Client(did, transport='websockets')
+                self.client_order_upd = self._make_client(did)
                 self.client_order_upd.on_connect = on_connect
                 self.client_order_upd.on_subscribe = on_subscribe
                 self.client_order_upd.on_message = on_order_message
@@ -156,7 +160,7 @@ class StreamConn :
                 self.client_order_upd.subscribe(json.dumps(say_hello))
                 #time.sleep(5)
 
-            self.client_streaming_quotes = mqtt.Client(client_id=did, transport='websockets')
+            self.client_streaming_quotes = self._make_client(did)
             self.client_streaming_quotes.on_connect = on_connect
             self.client_streaming_quotes.on_subscribe = on_subscribe
             self.client_streaming_quotes.on_unsubscribe = on_unsubscribe
