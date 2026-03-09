@@ -1,9 +1,12 @@
 import paho.mqtt.client as mqtt
 import threading
 import json
+import logging
 import time
 import os
 from . import webull
+
+logger = logging.getLogger(__name__)
 
 class StreamConn :
     def __init__(self, debug_flg=False):
@@ -12,6 +15,7 @@ class StreamConn :
         self.onmsg_lock = threading.RLock()
         self.price_func = None
         self.order_func = None
+        self.disconnect_func = None
         self.debug_flg = debug_flg
         self.total_volume={}
         self.client_order_upd = None
@@ -94,9 +98,7 @@ class StreamConn :
                         self.price_func(topic, data)
 
                 except Exception as e:
-                    print(e)
-                    time.sleep(2) #so theres time for message to print
-                    os._exit(6)
+                    logger.error("StreamConn price callback error: %s", e, exc_info=True)
 
         def on_subscribe(client, userdata, mid, granted_qos, *args):
             """
@@ -113,8 +115,16 @@ class StreamConn :
             with self.onsub_lock:
                 if self.debug_flg:
                     print(f"unsubscribe accepted with mid: {mid}")
+
+        def on_disconnect(client, userdata, rc, *args):
+            with self.oncon_lock:
+                if self.debug_flg:
+                    print(f"Disconnected with rc={rc}")
+                logger.info("StreamConn disconnected (rc=%s)", rc)
+                if self.disconnect_func is not None:
+                    self.disconnect_func(rc)
         #-------- end message callbacks
-        return on_connect, on_subscribe, on_price_message, on_order_message, on_unsubscribe
+        return on_connect, on_subscribe, on_price_message, on_order_message, on_unsubscribe, on_disconnect
 
 
     def connect(self, did, access_token=None) :
@@ -139,7 +149,7 @@ class StreamConn :
 
             #Has to be done this way to have them live in a class and not require self as the first parameter
             #in the callback functions
-            on_connect, on_subscribe, on_price_message, on_order_message, on_unsubscribe = self._setup_callbacks()
+            on_connect, on_subscribe, on_price_message, on_order_message, on_unsubscribe, on_disconnect = self._setup_callbacks()
 
             if not access_token is None:
                 # no need to listen to order updates if you don't have a access token
@@ -150,6 +160,7 @@ class StreamConn :
                 self.client_order_upd.on_connect = on_connect
                 self.client_order_upd.on_subscribe = on_subscribe
                 self.client_order_upd.on_message = on_order_message
+                self.client_order_upd.on_disconnect = on_disconnect
                 self.client_order_upd.tls_set_context()
                 # this is a default password that they use in the app
                 self.client_order_upd.username_pw_set('test', password='test')
@@ -165,6 +176,7 @@ class StreamConn :
             self.client_streaming_quotes.on_subscribe = on_subscribe
             self.client_streaming_quotes.on_unsubscribe = on_unsubscribe
             self.client_streaming_quotes.on_message = on_price_message
+            self.client_streaming_quotes.on_disconnect = on_disconnect
             self.client_streaming_quotes.tls_set_context()
             #this is a default password that they use in the app
             self.client_streaming_quotes.username_pw_set('test', password='test')
@@ -188,9 +200,7 @@ class StreamConn :
         try:
             self.client_streaming_quotes.loop()
         except Exception as e:
-            print(e)
-            time.sleep(2)  # so theres time for message to print
-            os._exit(6)
+            logger.error("StreamConn loop error: %s", e, exc_info=True)
 
     def subscribe(self, tId=None, level=105):
         #you can only use curly brackets for variables in a f string
@@ -201,6 +211,71 @@ class StreamConn :
     def unsubscribe(self, tId=None, level=105):
         self.client_streaming_quotes.unsubscribe(f'["type={level}&tid={tId}"]')
         #self.client_streaming_quotes.loop() #no need for this, you should already be in a loop
+
+    def connect_background(self, did, access_token=None):
+        """Connect using loop_start() — returns immediately, paho runs in background thread.
+
+        Use this for the streaming integration where the main thread needs to
+        remain free for the event loop.  After calling this, use subscribe()
+        then run_blocking_loop() is NOT needed — paho's background thread
+        handles all IO.
+        """
+        if access_token is None:
+            say_hello = {"header":
+                             {"did": did,
+                              "hl": "en",
+                              "app": "desktop",
+                              "os": "web",
+                              "osType": "windows"}
+                         }
+        else:
+            say_hello = {"header":
+                             {"access_token": access_token,
+                              "did": did,
+                              "hl": "en",
+                              "app": "desktop",
+                              "os": "web",
+                              "osType": "windows"}
+                         }
+
+        on_connect, on_subscribe, on_price_message, on_order_message, on_unsubscribe, on_disconnect = self._setup_callbacks()
+
+        if access_token is not None:
+            self.client_order_upd = self._make_client(did)
+            self.client_order_upd.on_connect = on_connect
+            self.client_order_upd.on_subscribe = on_subscribe
+            self.client_order_upd.on_message = on_order_message
+            self.client_order_upd.on_disconnect = on_disconnect
+            self.client_order_upd.tls_set_context()
+            self.client_order_upd.username_pw_set('test', password='test')
+            self.client_order_upd.connect('wspush.webullbroker.com', 443, 30)
+            self.client_order_upd.loop_start()
+            self.client_order_upd.subscribe(json.dumps(say_hello))
+
+        self.client_streaming_quotes = self._make_client(did)
+        self.client_streaming_quotes.on_connect = on_connect
+        self.client_streaming_quotes.on_subscribe = on_subscribe
+        self.client_streaming_quotes.on_unsubscribe = on_unsubscribe
+        self.client_streaming_quotes.on_message = on_price_message
+        self.client_streaming_quotes.on_disconnect = on_disconnect
+        self.client_streaming_quotes.tls_set_context()
+        self.client_streaming_quotes.username_pw_set('test', password='test')
+        self.client_streaming_quotes.connect('wspush.webullbroker.com', 443, 30)
+        self.client_streaming_quotes.loop_start()
+        time.sleep(0.5)  # brief pause for CONNACK
+        self.client_streaming_quotes.subscribe(json.dumps(say_hello))
+
+    def disconnect(self):
+        """Cleanly stop both MQTT clients."""
+        for client in (self.client_streaming_quotes, self.client_order_upd):
+            if client is not None:
+                try:
+                    client.loop_stop()
+                    client.disconnect()
+                except Exception as e:
+                    logger.debug("StreamConn disconnect cleanup: %s", e)
+        self.client_streaming_quotes = None
+        self.client_order_upd = None
 
 
 if __name__ == '__main__':
