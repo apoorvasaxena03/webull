@@ -6,7 +6,7 @@ import time
 import os
 from . import webull
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("webull_trader")
 
 class StreamConn :
     def __init__(self, debug_flg=False):
@@ -70,8 +70,7 @@ class StreamConn :
             The callback for when the client receives a CONNACK response from the server.
             """
             with self.oncon_lock:
-                if self.debug_flg:
-                    print("Connected with result code "+str(rc))
+                logger.info("MQTT connected (rc=%s)", rc)
                 if rc != 0:
                     raise ValueError("Connection Failed with rc:"+str(rc))
 
@@ -81,7 +80,7 @@ class StreamConn :
                 topic = json.loads(msg.topic)
                 data = json.loads(msg.payload)
                 if self.debug_flg:
-                    print(f'topic: {topic} ----- payload: {data}')
+                    logger.debug("MQTT order: topic=%s payload=%s", topic, data)
 
                 if self.order_func is not None:
                     self.order_func(topic, data)
@@ -92,7 +91,7 @@ class StreamConn :
                     topic = json.loads(msg.topic)
                     data = json.loads(msg.payload)
                     if self.debug_flg:
-                        print(f'topic: {topic} ----- payload: {data}')
+                        logger.debug("MQTT price: topic=%s payload=%s", topic, data)
 
                     if self.price_func is not None:
                         self.price_func(topic, data)
@@ -105,26 +104,33 @@ class StreamConn :
             The callback for when the client receives a SUBACK response from the server.
             """
             with self.onsub_lock:
-                if self.debug_flg:
-                    print(f"subscribe accepted with QOS: {granted_qos} with mid: {mid}")
+                logger.debug("MQTT subscribe accepted (QOS=%s mid=%s)", granted_qos, mid)
 
         def on_unsubscribe(client, userdata, mid, *args):
             """
               The callback for when the client receives a UNSUBACK response from the server.
               """
             with self.onsub_lock:
-                if self.debug_flg:
-                    print(f"unsubscribe accepted with mid: {mid}")
+                logger.debug("MQTT unsubscribe accepted (mid=%s)", mid)
 
         def on_disconnect(client, userdata, rc, *args):
             with self.oncon_lock:
-                if self.debug_flg:
-                    print(f"Disconnected with rc={rc}")
-                logger.info("StreamConn disconnected (rc=%s)", rc)
+                logger.warning("MQTT disconnected (rc=%s)", rc)
                 if self.disconnect_func is not None:
                     self.disconnect_func(rc)
+        def on_log(client, userdata, level, buf):
+            """Route paho internal log messages through Python logging."""
+            if level == mqtt.MQTT_LOG_ERR:
+                logger.error("paho-mqtt: %s", buf)
+            elif level == mqtt.MQTT_LOG_WARNING:
+                logger.warning("paho-mqtt: %s", buf)
+            elif level == mqtt.MQTT_LOG_INFO:
+                logger.info("paho-mqtt: %s", buf)
+            else:
+                logger.debug("paho-mqtt: %s", buf)
+
         #-------- end message callbacks
-        return on_connect, on_subscribe, on_price_message, on_order_message, on_unsubscribe, on_disconnect
+        return on_connect, on_subscribe, on_price_message, on_order_message, on_unsubscribe, on_disconnect, on_log
 
 
     def connect(self, did, access_token=None) :
@@ -149,7 +155,7 @@ class StreamConn :
 
             #Has to be done this way to have them live in a class and not require self as the first parameter
             #in the callback functions
-            on_connect, on_subscribe, on_price_message, on_order_message, on_unsubscribe, on_disconnect = self._setup_callbacks()
+            on_connect, on_subscribe, on_price_message, on_order_message, on_unsubscribe, on_disconnect, on_log = self._setup_callbacks()
 
             if not access_token is None:
                 # no need to listen to order updates if you don't have a access token
@@ -161,13 +167,14 @@ class StreamConn :
                 self.client_order_upd.on_subscribe = on_subscribe
                 self.client_order_upd.on_message = on_order_message
                 self.client_order_upd.on_disconnect = on_disconnect
+                self.client_order_upd.on_log = on_log
                 self.client_order_upd.tls_set_context()
                 # this is a default password that they use in the app
                 self.client_order_upd.username_pw_set('test', password='test')
                 self.client_order_upd.connect('wspush.webullbroker.com', 443, 30)
                 #time.sleep(5)
                 self.client_order_upd.loop_start()  # runs in a second thread
-                print('say hello')
+                logger.debug("MQTT order client: subscribing hello")
                 self.client_order_upd.subscribe(json.dumps(say_hello))
                 #time.sleep(5)
 
@@ -177,6 +184,7 @@ class StreamConn :
             self.client_streaming_quotes.on_unsubscribe = on_unsubscribe
             self.client_streaming_quotes.on_message = on_price_message
             self.client_streaming_quotes.on_disconnect = on_disconnect
+            self.client_streaming_quotes.on_log = on_log
             self.client_streaming_quotes.tls_set_context()
             #this is a default password that they use in the app
             self.client_streaming_quotes.username_pw_set('test', password='test')
@@ -207,6 +215,21 @@ class StreamConn :
         self.client_streaming_quotes.subscribe('{'+f'"tickerIds":[{tId}],"type":"{level}"'+'}')
         self.client_streaming_quotes.loop()
 
+    def subscribe_batch(self, tIds, level=105):
+        """Subscribe to multiple ticker IDs in a single MQTT packet.
+
+        Parameters
+        ----------
+        tIds : list[int]
+            List of numeric ticker IDs.
+        level : int
+            Topic type (103 for trade ticks, 105 for full tick).
+        """
+        if not tIds:
+            return
+        ids_str = ",".join(str(t) for t in tIds)
+        topic = '{' + f'"tickerIds":[{ids_str}],"type":"{level}"' + '}'
+        self.client_streaming_quotes.subscribe(topic)
 
     def unsubscribe(self, tId=None, level=105):
         self.client_streaming_quotes.unsubscribe(f'["type={level}&tid={tId}"]')
@@ -238,7 +261,7 @@ class StreamConn :
                               "osType": "windows"}
                          }
 
-        on_connect, on_subscribe, on_price_message, on_order_message, on_unsubscribe, on_disconnect = self._setup_callbacks()
+        on_connect, on_subscribe, on_price_message, on_order_message, on_unsubscribe, on_disconnect, on_log = self._setup_callbacks()
 
         if access_token is not None:
             self.client_order_upd = self._make_client(did)
@@ -246,6 +269,7 @@ class StreamConn :
             self.client_order_upd.on_subscribe = on_subscribe
             self.client_order_upd.on_message = on_order_message
             self.client_order_upd.on_disconnect = on_disconnect
+            self.client_order_upd.on_log = on_log
             self.client_order_upd.tls_set_context()
             self.client_order_upd.username_pw_set('test', password='test')
             self.client_order_upd.connect('wspush.webullbroker.com', 443, 30)
@@ -258,6 +282,7 @@ class StreamConn :
         self.client_streaming_quotes.on_unsubscribe = on_unsubscribe
         self.client_streaming_quotes.on_message = on_price_message
         self.client_streaming_quotes.on_disconnect = on_disconnect
+        self.client_streaming_quotes.on_log = on_log
         self.client_streaming_quotes.tls_set_context()
         self.client_streaming_quotes.username_pw_set('test', password='test')
         self.client_streaming_quotes.connect('wspush.webullbroker.com', 443, 30)
