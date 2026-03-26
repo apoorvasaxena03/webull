@@ -119,7 +119,13 @@ class StreamConn :
                 if self.disconnect_func is not None:
                     self.disconnect_func(rc)
         def on_log(client, userdata, level, buf):
-            """Route paho internal log messages through Python logging."""
+            """Route paho internal log messages through Python logging.
+
+            High-frequency messages (Received PUBLISH, Sending PUBLISH) are
+            routed to the ``paho.mqtt`` logger to keep them off the console.
+            Whether they are written to disk depends on the config setting
+            ``streaming.mqtt_file_log`` (see runner._setup_mqtt_file_logger).
+            """
             if level == mqtt.MQTT_LOG_ERR:
                 logger.error("paho-mqtt: %s", buf)
             elif level == mqtt.MQTT_LOG_WARNING:
@@ -127,7 +133,15 @@ class StreamConn :
             elif level == mqtt.MQTT_LOG_INFO:
                 logger.info("paho-mqtt: %s", buf)
             else:
-                logger.debug("paho-mqtt: %s", buf)
+                # Suppress per-packet noise (PUBLISH, PINGREQ/RESP) from
+                # console — these fire hundreds of times per minute during
+                # streaming.  Connection lifecycle messages (CONNECT, SUBSCRIBE,
+                # CONNACK, SUBACK) are still logged at DEBUG.
+                if "Received PUBLISH" in buf or "Sending PUBLISH" in buf \
+                        or "PINGREQ" in buf or "PINGRESP" in buf:
+                    logging.getLogger("paho.mqtt").debug("paho-mqtt: %s", buf)
+                else:
+                    logger.debug("paho-mqtt: %s", buf)
 
         #-------- end message callbacks
         return on_connect, on_subscribe, on_price_message, on_order_message, on_unsubscribe, on_disconnect, on_log
